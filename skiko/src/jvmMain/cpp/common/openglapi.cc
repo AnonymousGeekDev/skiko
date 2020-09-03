@@ -40,5 +40,3 @@ JNIEXPORT jint JNICALL Java_org_jetbrains_skiko_OpenGLApi_glGetIntegerv(JNIEnv *
 	glGetIntegerv(pname, &data);
 	return (jint)data;
 }
-
-}

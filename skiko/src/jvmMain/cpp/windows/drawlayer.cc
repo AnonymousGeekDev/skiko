@@ -194,4 +194,9 @@ extern "C"
         }
         return 1.0f;
     }
+
+    JNIEXPORT jlong JNICALL Java_org_jetbrains_skiko_SkiaWindowsKt_makeMetal(JNIEnv * env, jclass clazz, jint format) {
+        return 0;
+    }
+
 } // extern "C"

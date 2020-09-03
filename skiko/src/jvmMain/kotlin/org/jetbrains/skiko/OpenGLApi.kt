@@ -25,3 +25,9 @@ class OpenGLApi private constructor() {
         val instance = OpenGLApi()
     }
 }
+
+class MetalApi private constructor() {
+    companion object {
+        val instance = MetalApi()
+    }
+}

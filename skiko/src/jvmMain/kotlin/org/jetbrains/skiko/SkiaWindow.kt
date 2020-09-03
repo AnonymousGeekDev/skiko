@@ -31,7 +31,12 @@ interface SkiaRenderer {
     fun onDispose()
 }
 
+private external fun makeMetalNative(mtlFormat: Int): Long
+
+fun makeMetal(mtlFormat: Int) = BackendRenderTarget(makeMetalNative(mtlFormat))
+
 open class SkiaLayer : HardwareLayer() {
+    private val api = GraphicsApi.METAL
     var renderer: SkiaRenderer? = null
 
     private val skijaState = SkijaState()
@@ -50,7 +55,11 @@ open class SkiaLayer : HardwareLayer() {
             if (skijaState.context == null) {
                 skijaState.context = Context.makeGL()
             }
-            initSkija()
+            when (api) {
+                GraphicsApi.OPENGL -> initSkijaGL()
+                GraphicsApi.METAL -> initSkijaMetal()
+                else -> TODO("$api is not supported")
+            }
             renderer?.onInit()
             inited = true
             renderer?.onReshape(width, height)
@@ -63,10 +72,10 @@ open class SkiaLayer : HardwareLayer() {
         }
     }
 
-    private fun initSkija() {
+    private fun initSkijaGL() {
         val dpi = contentScale
         skijaState.clear()
-        val gl: OpenGLApi = OpenGLApi.instance
+        val gl = OpenGLApi.instance
         val fbId = gl.glGetIntegerv(gl.GL_DRAW_FRAMEBUFFER_BINDING)
         skijaState.renderTarget = BackendRenderTarget.makeGL(
             (width * dpi).toInt(),
@@ -76,6 +85,22 @@ open class SkiaLayer : HardwareLayer() {
             fbId,
             FramebufferFormat.GR_GL_RGBA8
         )
+        skijaState.surface = Surface.makeFromBackendRenderTarget(
+            skijaState.context,
+            skijaState.renderTarget,
+            SurfaceOrigin.BOTTOM_LEFT,
+            SurfaceColorFormat.RGBA_8888,
+            ColorSpace.getSRGB()
+        )
+        skijaState.canvas = skijaState.surface!!.canvas
+        skijaState.canvas!!.scale(dpi, dpi)
+    }
+
+    private fun initSkijaMetal() {
+        val dpi = contentScale
+        skijaState.clear()
+        val metal = MetalApi.instance
+        skijaState.renderTarget = makeMetal(70 /* MTLPixelFormatRGBA8Unorm */)
         skijaState.surface = Surface.makeFromBackendRenderTarget(
             skijaState.context,
             skijaState.renderTarget,

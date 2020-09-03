@@ -74,13 +74,21 @@ jobject windowRef;
 
 @end
 
+@implementation AWTMetalLayer : CAMetalLayer
+
+- (void) dispose
+{
+    self.windowRef = NULL;
+}
+
+@end
+
 @interface LayersSet : NSObject
 
 @property jobject windowRef;
 @property (retain, strong) CALayer *caLayer;
 @property (retain, strong) AWTGLLayer *glLayer;
-@property (retain, strong) AWTGLLayer *metalLayer;
-
+@property (retain, strong) AWTMetalLayer *metalLayer;
 
 @end
 
@@ -214,11 +222,10 @@ JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_updateLayer(JNIEnv
         [layersSet.glLayer setWindowRef: windowRef];
 
         layersSet.metalLayer = [AWTMetalLayer new];
-        [layersSet.caLayer addSublayer: layersSet.metallLayer];
-        CGFloat white[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        [layersSet.caLayer addSublayer: layersSet.metalLayer];
         layersSet.metalLayer.backgroundColor = CGColorCreate(CGColorSpaceCreateDeviceRGB(), white);
-        layersSet.metallLayer.contentsScale = scaleFactor;
-        [layersSet.metallLayer setWindowRef: windowRef];
+        layersSet.metalLayer.contentsScale = scaleFactor;
+        [layersSet.metalLayer setWindowRef: windowRef];
 
         [layersSet setWindowRef: windowRef];
         [layersSet syncSize];
@@ -253,4 +260,9 @@ JNIEXPORT jfloat JNICALL Java_org_jetbrains_skiko_HardwareLayer_getContentScale(
             return [layer.glLayer contentsScale];
     }
     return 1.0f;
+}
+
+JNIEXPORT jlong JNICALL Java_org_jetbrains_skiko_SkiaWindowsKt_makeMetal(JNIEnv * env, jclass clazz, jint format) {
+    GrBackendRenderTarget* obj = GrBackendRenderTarget::MakeMtl(static_cast<GrMTLPixelFormat>(format));
+    return reinterpret_cast<jlong>(obj);
 }
