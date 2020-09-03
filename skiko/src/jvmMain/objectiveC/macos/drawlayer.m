@@ -15,6 +15,12 @@ JavaVM *jvm = NULL;
 
 @end
 
+@interface AWTMetalLayer : CAMetalLayer
+
+@property jobject windowRef;
+
+@end
+
 @implementation AWTGLLayer
 
 jobject windowRef;
@@ -73,6 +79,8 @@ jobject windowRef;
 @property jobject windowRef;
 @property (retain, strong) CALayer *caLayer;
 @property (retain, strong) AWTGLLayer *glLayer;
+@property (retain, strong) AWTGLLayer *metalLayer;
+
 
 @end
 
@@ -81,6 +89,7 @@ jobject windowRef;
 jobject windowRef;
 CALayer *caLayer;
 AWTGLLayer *glLayer;
+AWTMetalLayer *metalLayer;
 
 - (id)init
 {
@@ -91,6 +100,7 @@ AWTGLLayer *glLayer;
         self.windowRef = NULL;
         self.caLayer = NULL;
         self.glLayer = NULL;
+        self.metalLayer = NULL;
     }
 
     return self;
@@ -100,17 +110,22 @@ AWTGLLayer *glLayer;
 {
     self.glLayer.bounds = self.caLayer.bounds;
     self.glLayer.frame = self.caLayer.frame;
+    self.metalLayer.bounds = self.caLayer.bounds;
+    self.metalLayer.frame = self.caLayer.frame;
 }
 
 - (void) update
 {
     [self.glLayer performSelectorOnMainThread:@selector(setNeedsDisplay) withObject:0 waitUntilDone:NO];
+    [self.metalLayer performSelectorOnMainThread:@selector(setNeedsDisplay) withObject:0 waitUntilDone:NO];
 }
 
 - (void) dispose
 {
     [self.glLayer dispose];
     self.glLayer = NULL;
+    [self.metalLayer dispose];
+    self.metalLayer = NULL;
     self.caLayer = NULL;
 }
 
@@ -134,7 +149,7 @@ JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_updateLayer(JNIEnv
     if (windowsSet != nil) {
         LayersSet *layer = findByObject(env, window);
         if (layer != NULL) {
-            if (layer.caLayer == NULL && layer.glLayer == NULL) {
+            if (layer.caLayer == NULL && (layer.glLayer == NULL || layer.metalLayer == NULL)) {
                 (*env)->DeleteGlobalRef(env, layer.windowRef);
                 layer.windowRef = NULL;
                 [windowsSet removeObject: layer];
@@ -197,6 +212,14 @@ JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_updateLayer(JNIEnv
         jobject windowRef = (*env)->NewGlobalRef(env, window);
 
         [layersSet.glLayer setWindowRef: windowRef];
+
+        layersSet.metalLayer = [AWTMetalLayer new];
+        [layersSet.caLayer addSublayer: layersSet.metallLayer];
+        CGFloat white[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        layersSet.metalLayer.backgroundColor = CGColorCreate(CGColorSpaceCreateDeviceRGB(), white);
+        layersSet.metallLayer.contentsScale = scaleFactor;
+        [layersSet.metallLayer setWindowRef: windowRef];
+
         [layersSet setWindowRef: windowRef];
         [layersSet syncSize];
 
@@ -223,8 +246,11 @@ JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_disposeLayer(JNIEn
 
 JNIEXPORT jfloat JNICALL Java_org_jetbrains_skiko_HardwareLayer_getContentScale(JNIEnv *env, jobject window) {
     LayersSet *layer = findByObject(env, window);
-    if (layer != NULL) {
-        return [layer.glLayer contentsScale];
+    if (layer != NULL && layer.metalLayer != NULL) {
+        return [layer.metalLayer contentsScale];
+    }
+    if (layer != NULL && layer.glLayer != NULL) {
+            return [layer.glLayer contentsScale];
     }
     return 1.0f;
 }
