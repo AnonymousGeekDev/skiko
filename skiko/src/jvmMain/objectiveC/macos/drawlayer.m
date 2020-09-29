@@ -45,7 +45,6 @@ jobject windowRef;
     CGLSetCurrentContext(ctx);
 
     if (jvm != NULL) {
-        // TODO: cache wndClass and drawMethod.
         JNIEnv *env;
         (*jvm)->AttachCurrentThread(jvm, (void **)&env, NULL);
 
@@ -75,6 +74,7 @@ jobject windowRef;
 @property jobject windowRef;
 @property (retain, strong) CALayer *caLayer;
 @property (retain, strong) AWTGLLayer *glLayer;
+@property (retain, strong) NSWindow *window;
 
 @end
 
@@ -84,7 +84,7 @@ jobject windowRef;
 CALayer *caLayer;
 AWTGLLayer *glLayer;
 
-- (id)init
+- (id) init
 {
     self = [super init];
 
@@ -93,6 +93,7 @@ AWTGLLayer *glLayer;
         self.windowRef = NULL;
         self.caLayer = NULL;
         self.glLayer = NULL;
+        self.window = NULL;
     }
 
     return self;
@@ -100,6 +101,9 @@ AWTGLLayer *glLayer;
 
 - (void) syncSize
 {
+    float scaleFactor = [[self.window screen] backingScaleFactor];
+    self.caLayer.contentsScale = scaleFactor;
+    self.glLayer.contentsScale = scaleFactor;
     self.glLayer.bounds = self.caLayer.bounds;
     self.glLayer.frame = self.caLayer.frame;
 }
@@ -114,10 +118,12 @@ AWTGLLayer *glLayer;
     [self.glLayer dispose];
     self.glLayer = NULL;
     self.caLayer = NULL;
+    self.window = NULL;
 }
 
 @end
 
+NSMutableArray *unknownWindows = nil;
 NSMutableSet *windowsSet = nil;
 LayersSet * findByObject(JNIEnv *env, jobject object) {
     for (LayersSet* value in windowsSet) {
@@ -125,7 +131,7 @@ LayersSet * findByObject(JNIEnv *env, jobject object) {
             return value;
         }
     }
-    NSLog(@"The set does not contain this window.");
+
     return NULL;
 }
 
@@ -180,28 +186,40 @@ JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_updateLayer(JNIEnv
         LayersSet *layersSet = [[LayersSet alloc] init];
         [windowsSet addObject: layersSet];
 
+        NSMutableArray<NSWindow *> *windows = [NSMutableArray arrayWithArray: [[NSApplication sharedApplication] windows]];
+        if ([windowsSet count] == 1)
+        {
+            NSWindow *mainWindow = [[NSApplication sharedApplication] mainWindow];
+            layersSet.window = mainWindow;
+            [windows removeObject: mainWindow];
+            unknownWindows = windows;
+        }
+        else
+        {
+            for (NSWindow* value in unknownWindows) {
+                [windows removeObject: value];
+            }
+            for (LayersSet* value in windowsSet) {
+                [windows removeObject: value.window];
+            }
+            layersSet.window = [windows firstObject];
+        }
+
         layersSet.caLayer = [dsi_mac windowLayer];
         [layersSet.caLayer removeAllAnimations];
         [layersSet.caLayer setAutoresizingMask: (kCALayerWidthSizable|kCALayerHeightSizable)];
         [layersSet.caLayer setNeedsDisplayOnBoundsChange: YES];
 
-        NSScreen *screen = [NSScreen mainScreen];
-        float scaleFactor = screen.backingScaleFactor;
-
-        layersSet.caLayer.contentsScale = scaleFactor;
-
         layersSet.glLayer = [AWTGLLayer new];
         [layersSet.caLayer addSublayer: layersSet.glLayer];
         CGFloat white[] = { 1.0f, 1.0f, 1.0f, 1.0f };
         layersSet.glLayer.backgroundColor = CGColorCreate(CGColorSpaceCreateDeviceRGB(), white);
-        layersSet.glLayer.contentsScale = scaleFactor;
         
         jobject windowRef = (*env)->NewGlobalRef(env, window);
 
         [layersSet.glLayer setWindowRef: windowRef];
         [layersSet setWindowRef: windowRef];
         [layersSet syncSize];
-
     }
 
     ds->FreeDrawingSurfaceInfo(dsi);
@@ -226,7 +244,7 @@ JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_disposeLayer(JNIEn
 JNIEXPORT jfloat JNICALL Java_org_jetbrains_skiko_HardwareLayer_getContentScale(JNIEnv *env, jobject window) {
     LayersSet *layer = findByObject(env, window);
     if (layer != NULL) {
-        return [layer.glLayer contentsScale];
+        return layer.caLayer.contentsScale;
     }
     return 1.0f;
 }
