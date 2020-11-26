@@ -1,13 +1,48 @@
 import org.gradle.api.Project
 import java.io.File
 
-val hostOs = System.getProperty("os.name")
-val target = when {
-    hostOs == "Mac OS X" -> "macos"
-    hostOs == "Linux" -> "linux"
-    hostOs.startsWith("Win") -> "windows"
-    else -> throw Error("Unknown os $hostOs")
+enum class OS(val id: String) {
+    Linux("linux"),
+    Windows("windows"),
+    MacOS("macos")
+    ;
+
+    val isWindows
+        get() = this == Windows
 }
+
+enum class Arch(val id: String) {
+    X64("x64"),
+    Arm64("arm64")
+}
+
+val hostOs by lazy {
+    val osName = System.getProperty("os.name")
+    when {
+        osName == "Mac OS X" -> OS.MacOS
+        osName == "Linux" -> OS.Linux
+        osName.startsWith("Win") -> OS.Windows
+        else -> throw Error("Unknown OS $osName")
+    }
+}
+
+val hostArch by lazy {
+    val osArch = System.getProperty("os.arch")
+    when (osArch) {
+        "x86_64", "amd64" -> Arch.X64
+        "aarch64" -> Arch.Arm64
+        else -> throw Error("Unknown arch $osArch")
+    }
+}
+
+val targetOs = hostOs
+val targetArch = hostArch
+
+val target = targetId(targetOs, targetArch)
+
+fun targetId(os: OS, arch: Arch) =
+    "${os.id}-${arch.id}"
+
 val jdkHome = System.getProperty("java.home") ?: error("'java.home' is null")
 
 class SkikoProperties(private val myProject: Project) {
@@ -42,7 +77,8 @@ class SkikoProperties(private val myProject: Project) {
         get() = System.getenv()["SKIJA_DIR"]?.let { File(it) }?.takeIf { it.isDirectory }
 
     val skiaDir: File?
-        get() = (System.getenv()["SKIA_DIR"] ?: System.getProperty("skia.dir"))?.let { File(it) }?.takeIf { it.isDirectory }
+        get() = (System.getenv()["SKIA_DIR"] ?: System.getProperty("skia.dir"))?.let { File(it) }
+            ?.takeIf { it.isDirectory }
 
     val composeRepoUrl: String
         get() = System.getenv("COMPOSE_REPO_URL") ?: "https://maven.pkg.jetbrains.space/public/p/compose/dev"
@@ -55,4 +91,11 @@ class SkikoProperties(private val myProject: Project) {
 
     val dependenciesDir: File
         get() = myProject.rootProject.projectDir.resolve("dependencies")
+}
+
+object SkikoArtifacts {
+    // names are also used in samples, e.g. samples/SkijaInjectSample/build.gradle
+    val commonArtifactId = "skiko-jvm"
+    fun runtimeArtifactIdFor(os: OS, arch: Arch) =
+        "skiko-jvm-runtime-${targetId(os, arch)}"
 }

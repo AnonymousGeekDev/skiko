@@ -27,7 +27,7 @@ import javax.swing.KeyStroke
 import java.awt.Toolkit
 
 fun main(args: Array<String>) {
-    createWindow("First window");
+    createWindow("First window")
 }
 
 fun createWindow(title: String) {
@@ -36,15 +36,10 @@ fun createWindow(title: String) {
 
     val window = SkiaWindow()
     window.defaultCloseOperation = WindowConstants.EXIT_ON_CLOSE
+    window.title = title
 
     // Create menu.
     val menuBar = JMenuBar()
-    try {
-        System.setProperty("apple.laf.useScreenMenuBar", "true")
-        java.awt.Desktop.getDesktop().setDefaultMenuBar(menuBar)
-    } catch (e: UnsupportedOperationException) {
-        // Not all platforms allow this.
-    }
     val menu = JMenu("File")
     menuBar.add(menu)
     val menuItem = JMenuItem("Say Hello")
@@ -73,9 +68,9 @@ fun createWindow(title: String) {
         }
     })
 
-    window.setVisible(true)
-    // MANDATORY: set window size after calling setVisible(true)
+    // MANDATORY: set window size before calling setVisible(true)
     window.setSize(800, 600)
+    window.setVisible(true)
 }
 
 class Renderer(val displayScene: (Renderer, Int, Int) -> Unit): SkiaRenderer {

@@ -2,8 +2,16 @@ package org.jetbrains.skiko
 
 import java.awt.Graphics
 import java.awt.Canvas
+import javax.swing.SwingUtilities.convertPoint
+import javax.swing.SwingUtilities.getRootPane
 
 open class HardwareLayer : Canvas(), Drawable {
+    companion object {
+        init {
+            Library.load()
+        }
+    }
+
     override fun paint(g: Graphics) {
         display()
     }
@@ -18,5 +26,9 @@ open class HardwareLayer : Canvas(), Drawable {
     override val windowHandle: Long
         external get
     override val contentScale: Float
-        external get
+        get() = graphicsConfiguration.defaultTransform.scaleX.toFloat()
+    val absoluteX: Int
+        get() = convertPoint(this, x, y, getRootPane(this)).x
+    val absoluteY: Int
+        get() = convertPoint(this, x, y, getRootPane(this)).y
 }

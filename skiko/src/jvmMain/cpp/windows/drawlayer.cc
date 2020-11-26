@@ -15,23 +15,23 @@ using namespace std;
 JavaVM *jvm = NULL;
 extern "C" jboolean Skiko_GetAWT(JNIEnv *env, JAWT *awt);
 
-class LayersSet
+class LayerHandler
 {
 public:
-    jobject windowRef;
+    jobject canvasGlobalRef;
     HGLRC context;
-    HWND handler;
     HDC device;
 
-    void update()
+    void updateLayerContent()
     {
         draw();
     }
 
-    void dispose()
+    void disposeLayer(JNIEnv *env)
     {
+        env->DeleteGlobalRef(canvasGlobalRef);
+        canvasGlobalRef = NULL;
         context = NULL;
-        handler = NULL;
         device = NULL;
     }
 
@@ -44,14 +44,16 @@ private:
             jvm->GetEnv((void **)&env, JNI_VERSION_10);
             wglMakeCurrent(device, context);
 
-            jclass wndClass = env->GetObjectClass(windowRef);
-            jmethodID drawMethod = env->GetMethodID(wndClass, "draw", "()V");
+            static jclass wndClass = NULL;
+            if (!wndClass) wndClass = env->GetObjectClass(canvasGlobalRef);
+            static jmethodID drawMethod = NULL;
+            if (!drawMethod) drawMethod = env->GetMethodID(wndClass, "draw", "()V");
             if (NULL == drawMethod)
             {
                 fprintf(stderr, "The method Window.draw() not found!\n");
                 return;
             }
-            env->CallVoidMethod(windowRef, drawMethod);
+            env->CallVoidMethod(canvasGlobalRef, drawMethod);
 
             glFinish();
             SwapBuffers(device);
@@ -59,12 +61,12 @@ private:
     }
 };
 
-set<LayersSet *> *windowsSet = NULL;
-LayersSet *findByObject(JNIEnv *env, jobject object)
+set<LayerHandler *> *layerStorage = NULL;
+LayerHandler *findByObject(JNIEnv *env, jobject object)
 {
-    for (auto &layer : *windowsSet)
+    for (auto &layer : *layerStorage)
     {
-        if (env->IsSameObject(object, layer->windowRef) == JNI_TRUE)
+        if (env->IsSameObject(object, layer->canvasGlobalRef) == JNI_TRUE)
         {
             return layer;
         }
@@ -75,27 +77,19 @@ LayersSet *findByObject(JNIEnv *env, jobject object)
 
 extern "C"
 {
-
-    JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_updateLayer(JNIEnv *env, jobject window)
+    JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_updateLayer(JNIEnv *env, jobject canvas)
     {
-        if (windowsSet != NULL)
+        if (layerStorage != NULL)
         {
-            LayersSet *layer = findByObject(env, window);
+            LayerHandler *layer = findByObject(env, canvas);
             if (layer != NULL)
             {
-                if (layer->context == NULL)
-                {
-                    env->DeleteGlobalRef(layer->windowRef);
-                    layer->windowRef = NULL;
-                    windowsSet->erase(layer);
-                    delete layer;
-                }
                 return;
             }
         }
         else
         {
-            windowsSet = new set<LayersSet *>();
+            layerStorage = new set<LayerHandler *>();
         }
 
         JAWT awt;
@@ -122,7 +116,7 @@ extern "C"
             env->GetJavaVM(&jvm);
         }
 
-        ds = awt.GetDrawingSurface(env, window);
+        ds = awt.GetDrawingSurface(env, canvas);
         lock = ds->Lock(ds);
         dsi = ds->GetDrawingSurfaceInfo(ds);
         dsi_win = (JAWT_Win32DrawingSurfaceInfo *)dsi->platformInfo;
@@ -144,14 +138,13 @@ extern "C"
             DescribePixelFormat(device, iPixelFormat, sizeof(PIXELFORMATDESCRIPTOR), &pixFormatDscr);
             context = wglCreateContext(device);
 
-            LayersSet *layer = new LayersSet();
-            windowsSet->insert(layer);
+            LayerHandler *layer = new LayerHandler();
+            layerStorage->insert(layer);
 
-            jobject windowRef = env->NewGlobalRef(window);
+            jobject canvasRef = env->NewGlobalRef(canvas);
 
-            layer->windowRef = windowRef;
+            layer->canvasGlobalRef = canvasRef;
             layer->context = context;
-            layer->handler = hwnd;
             layer->device = device;
         }
 
@@ -160,42 +153,27 @@ extern "C"
         awt.FreeDrawingSurface(ds);
     }
 
-    JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_redrawLayer(JNIEnv *env, jobject window)
+    JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_redrawLayer(JNIEnv *env, jobject canvas)
     {
-        LayersSet *layer = findByObject(env, window);
+        LayerHandler *layer = findByObject(env, canvas);
         if (layer != NULL)
         {
-            layer->update();
+            layer->updateLayerContent();
         }
     }
 
-    JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_disposeLayer(JNIEnv *env, jobject window)
+    JNIEXPORT void JNICALL Java_org_jetbrains_skiko_HardwareLayer_disposeLayer(JNIEnv *env, jobject canvas)
     {
-        LayersSet *layer = findByObject(env, window);
+        LayerHandler *layer = findByObject(env, canvas);
         if (layer != NULL)
         {
-            layer->dispose();
+            layerStorage->erase(layer);
+            layer->disposeLayer(env);
+            delete layer;
         }
     }
 
-    JNIEXPORT jfloat JNICALL Java_org_jetbrains_skiko_HardwareLayer_getContentScale(JNIEnv *env, jobject window)
-    {
-        LayersSet *layer = findByObject(env, window);
-        if (layer != NULL)
-        {
-            // get scale dpi factor of current monitor
-            HWND parent = GetParent(layer->handler);
-            if (parent != NULL)
-            {
-                UINT dpi = GetDpiForWindow(parent);
-                float result = dpi / 96.0;
-                return result;
-            }
-        }
-        return 1.0f;
-    }
-
-    JNIEXPORT jlong JNICALL Java_org_jetbrains_skiko_HardwareLayer_getWindowHandle(JNIEnv *env, jobject window)
+    JNIEXPORT jlong JNICALL Java_org_jetbrains_skiko_HardwareLayer_getWindowHandle(JNIEnv *env, jobject canvas)
     {
         JAWT awt;
         JAWT_DrawingSurface *ds = NULL;
@@ -221,7 +199,7 @@ extern "C"
             env->GetJavaVM(&jvm);
         }
 
-        ds = awt.GetDrawingSurface(env, window);
+        ds = awt.GetDrawingSurface(env, canvas);
         lock = ds->Lock(ds);
         dsi = ds->GetDrawingSurfaceInfo(ds);
         dsi_win = (JAWT_Win32DrawingSurfaceInfo *)dsi->platformInfo;
