@@ -1,5 +1,11 @@
 package org.jetbrains.skiko
 
+import org.jetbrains.skiko.SkikoProperties.renderApi
+import org.jetbrains.skiko.redrawer.LinuxOpenGLRedrawer
+import org.jetbrains.skiko.redrawer.MacOsOpenGLRedrawer
+import org.jetbrains.skiko.redrawer.RasterRedrawer
+import org.jetbrains.skiko.redrawer.Redrawer
+import org.jetbrains.skiko.redrawer.WindowsOpenGLRedrawer
 import java.awt.Component
 import java.awt.Window
 import javax.swing.SwingUtilities
@@ -8,6 +14,7 @@ internal interface PlatformOperations {
     fun isFullscreen(component: Component): Boolean
     fun setFullscreen(component: Component, value: Boolean)
     fun getDpiScale(component: Component): Float
+    fun createRedrawer(layer: HardwareLayer): Redrawer
 }
 
 internal val platformOperations: PlatformOperations by lazy {
@@ -23,6 +30,11 @@ internal val platformOperations: PlatformOperations by lazy {
 
                 override fun getDpiScale(component: Component): Float {
                     return component.graphicsConfiguration.defaultTransform.scaleX.toFloat()
+                }
+
+                override fun createRedrawer(layer: HardwareLayer) = when(renderApi) {
+                    GraphicsApi.SOFTWARE -> RasterRedrawer(layer)
+                    else -> MacOsOpenGLRedrawer(layer)
                 }
         }
         OS.Windows -> {
@@ -42,6 +54,11 @@ internal val platformOperations: PlatformOperations by lazy {
                 override fun getDpiScale(component: Component): Float {
                     return component.graphicsConfiguration.defaultTransform.scaleX.toFloat()
                 }
+
+                override fun createRedrawer(layer: HardwareLayer) = when(renderApi) {
+                    GraphicsApi.SOFTWARE -> RasterRedrawer(layer)
+                    else -> WindowsOpenGLRedrawer(layer)
+                }
             }
         }
         OS.Linux -> {
@@ -59,7 +76,24 @@ internal val platformOperations: PlatformOperations by lazy {
                 }
 
                 override fun getDpiScale(component: Component): Float {
-                    return linuxGetDpiScaleNative(component)
+                    return component.graphicsConfiguration.defaultTransform.scaleX.toFloat()
+                    // TODO doesn't work well because java doesn't scale windows (content has offset with 200% scale)
+                    //
+                    // Two solutions:
+                    // 1. dynamically change sun.java2d.uiScale (it is global property, so we have to be careful) and update all windows
+                    //
+                    // 2. apply contentScale manually to all windows
+                    // (it is not good, because on different platform windows will have different size.
+                    // Maybe we will apply contentScale manually on all platforms?)
+
+                    // see also comment for HardwareLayer.checkContentScale
+
+//                    return component.useDrawingSurfacePlatformInfo(::linuxGetDpiScaleNative)
+                }
+
+                override fun createRedrawer(layer: HardwareLayer) = when(renderApi) {
+                    GraphicsApi.SOFTWARE -> RasterRedrawer(layer)
+                    else -> LinuxOpenGLRedrawer(layer)
                 }
             }
         }
@@ -71,4 +105,4 @@ external private fun osxIsFullscreenNative(component: Component): Boolean
 external private fun osxSetFullscreenNative(component: Component, value: Boolean)
 
 // Linux
-external private fun linuxGetDpiScaleNative(component: Component): Float
+external private fun linuxGetDpiScaleNative(platformInfo: Long): Float

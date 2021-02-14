@@ -1,6 +1,7 @@
 import de.undercouch.gradle.tasks.download.Download
-import kotlin.text.capitalize
 import org.gradle.crypto.checksum.Checksum
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.jetbrains.kotlin.gradle.tasks.KotlinTest
 
 plugins {
     kotlin("multiplatform") version "1.3.72"
@@ -9,6 +10,8 @@ plugins {
     id("org.gradle.crypto.checksum") version "1.1.0"
     id("de.undercouch.download") version "4.1.1"
 }
+
+val coroutinesVersion = "1.4.1"
 
 buildscript {
     dependencies {
@@ -36,12 +39,12 @@ repositories {
 }
 
 val skiaZip = run {
-    val zipName = skiko.skiaReleaseForCurrentOS + ".zip"
+    val zipName = skiko.skiaReleaseForTargetOS + ".zip"
     val zipFile = skiko.dependenciesDir.resolve("skia/${zipName.substringAfterLast('/')}")
 
     tasks.register("downloadSkia", Download::class) {
         onlyIf { skiko.skiaDir == null && !zipFile.exists() }
-        inputs.property("skia.release.for.current.os", skiko.skiaReleaseForCurrentOS)
+        inputs.property("skia.release.for.target.os", skiko.skiaReleaseForTargetOS)
         src("https://github.com/JetBrains/skia-build/releases/download/$zipName")
         dest(zipFile)
         onlyIfModified(true)
@@ -117,8 +120,6 @@ val skijaDir = run {
     }
 }
 
-
-
 val lombok by configurations.creating
 val jetbrainsAnnotations by configurations.creating
 dependencies {
@@ -153,14 +154,6 @@ kotlin {
         withJava()
     }
 
-    val nativeTarget = when (targetOs) {
-        // TODO: not entirely correct for macOS ARM.
-        OS.MacOS -> macosX64("native")
-        OS.Linux -> linuxX64("native")
-        OS.Windows -> mingwX64("native")
-        else -> throw GradleException("Host OS is not supported in Kotlin/Native.")
-    }
-
     sourceSets {
         val commonMain by getting {
             dependencies {
@@ -177,6 +170,7 @@ kotlin {
             kotlin.srcDirs(skijaSrcDir)
             dependencies {
                 implementation(kotlin("stdlib-jdk8"))
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:$coroutinesVersion")
                 compileOnly(lombok)
                 compileOnly(jetbrainsAnnotations)
             }
@@ -184,11 +178,10 @@ kotlin {
         }
         val jvmTest by getting {
             dependencies {
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$coroutinesVersion")
                 implementation(kotlin("test-junit"))
             }
         }
-        val nativeMain by getting
-        val nativeTest by getting
     }
 }
 
@@ -216,8 +209,10 @@ tasks.withType(CppCompile::class.java).configureEach {
         "-I$skiaDir/include/effects",
         "-I$skiaDir/include/pathops",
         "-I$skiaDir/include/utils",
+        "-I$skiaDir/modules/skottie/include",
         "-I$skiaDir/modules/skparagraph/include",
         "-I$skiaDir/modules/skshaper/include",
+        "-I$skiaDir/modules/sksg/include",
         "-I$skiaDir/modules/svg/include",
         "-I$skiaDir/third_party/externals/harfbuzz/src",
         "-DSK_ALLOW_STATIC_GLOBAL_INITIALIZERS=1",
@@ -233,6 +228,7 @@ tasks.withType(CppCompile::class.java).configureEach {
         "-DSK_UNICODE_AVAILABLE",
         *buildType.flags
     ))
+    val includeDir = "$projectDir/src/jvmMain/cpp/include"
     when (targetOs) {
         OS.MacOS -> {
             compilerArgs.addAll(
@@ -240,6 +236,7 @@ tasks.withType(CppCompile::class.java).configureEach {
                     "-fvisibility=hidden",
                     "-fvisibility-inlines-hidden",
                     "-I$jdkHome/include/darwin",
+                    "-I$includeDir",
                     "-DSK_SHAPER_CORETEXT_AVAILABLE",
                     "-DSK_BUILD_FOR_MAC",
                     "-DSK_METAL",
@@ -253,6 +250,7 @@ tasks.withType(CppCompile::class.java).configureEach {
                     "-fvisibility=hidden",
                     "-fvisibility-inlines-hidden",
                     "-I$jdkHome/include/linux",
+                    "-I$includeDir",
                     "-DSK_BUILD_FOR_LINUX",
                     "-DSK_R32_SHIFT=16",
                     *buildType.clangFlags
@@ -263,6 +261,7 @@ tasks.withType(CppCompile::class.java).configureEach {
             compilerArgs.addAll(
                 listOf(
                     "-I$jdkHome/include/win32",
+                    "-I$includeDir",
                     "-DSK_BUILD_FOR_WIN",
                     "-D_CRT_SECURE_NO_WARNINGS",
                     "-D_HAS_EXCEPTIONS=0",
@@ -283,20 +282,66 @@ tasks.withType(CppCompile::class.java).configureEach {
 project.tasks.register<Exec>("objcCompile") {
     val inputDir = "$projectDir/src/jvmMain/objectiveC/${targetOs.id}"
     val outDir = "$buildDir/objc/$target"
-    val objcSrc = "drawlayer"
+    val names = File(inputDir).listFiles()!!.map { it.name.removeSuffix(".m") }
+    val srcs = names.map { "$inputDir/$it.m" }.toTypedArray()
+    val outs = names.map { "$outDir/$it.o" }.toTypedArray()
+    workingDir = File(outDir)
     commandLine = listOf(
         "clang",
         "-mmacosx-version-min=10.13",
         "-I$jdkHome/include",
         "-I$jdkHome/include/darwin",
         "-c",
-        "$inputDir/$objcSrc.m",
-        "-o",
-        "$outDir/$objcSrc.o"
+        *srcs
     )
     file(outDir).mkdirs()
-    inputs.files("$inputDir/$objcSrc.m")
-    outputs.files("$outDir/$objcSrc.o")
+    inputs.files(srcs)
+    outputs.files(outs)
+}
+
+fun localSign(signer: String, lib: File) {
+    println("Local signing $lib as $signer")
+    val proc = ProcessBuilder("codesign", "-f", "-s", signer, lib.absolutePath)
+        .redirectOutput(ProcessBuilder.Redirect.PIPE)
+        .redirectError(ProcessBuilder.Redirect.PIPE)
+        .start()
+    proc.waitFor(5, TimeUnit.MINUTES)
+    if (proc.exitValue() != 0) {
+        val out = proc.inputStream.bufferedReader().readText()
+        val err = proc.errorStream.bufferedReader().readText()
+        println(out)
+        println(err)
+        throw GradleException("Cannot sign $lib: $err")
+    }
+}
+
+fun remoteSign(sign_host: String, lib: File) {
+    println("Remote signing $lib on $sign_host")
+    val user = project.properties["sign_host_user"] as String
+    val token = project.properties["sign_host_token"] as String
+    val out = file("${lib.absolutePath}.signed")
+    val cmd = """
+        TOKEN=`curl -fsSL --user $user:$token --url "$sign_host/auth" | grep token | cut -d '"' -f4` \
+        && curl --no-keepalive --data-binary @${lib.absolutePath} \
+        -H "Authorization: Bearer ${'$'}TOKEN" \
+        -H "Content-Type:application/x-mac-app-bin" \
+        "$sign_host/sign?name=${lib.name}" -o "${out.absolutePath}"
+    """.trimIndent()
+    val proc = ProcessBuilder("bash", "-c", cmd)
+        .redirectOutput(ProcessBuilder.Redirect.PIPE)
+        .redirectError(ProcessBuilder.Redirect.PIPE)
+        .start()
+    proc.waitFor(5, TimeUnit.MINUTES)
+    if (proc.exitValue() != 0) {
+        val out = proc.inputStream.bufferedReader().readText()
+        val err = proc.errorStream.bufferedReader().readText()
+        println(out)
+        println(err)
+        throw GradleException("Cannot sign $lib: $err")
+    } else {
+        lib.delete()
+        out.renameTo(lib)
+    }
 }
 
 tasks.withType(LinkSharedLibrary::class.java).configureEach {
@@ -322,7 +367,9 @@ tasks.withType(LinkSharedLibrary::class.java).configureEach {
             linkerArgs.addAll(
                 listOf(
                     "-lGL",
-                    "-lfontconfig"
+                    "-lfontconfig",
+                    // Hack to fix problem with linker not always finding certain declarations.
+                    skiaDir.get().absolutePath + "/out/${buildType.id}-${targetArch.id}/libsksg.a"
                 )
             )
         }
@@ -330,11 +377,26 @@ tasks.withType(LinkSharedLibrary::class.java).configureEach {
             linkerArgs.addAll(
                 listOf(
                     "gdi32.lib",
+                    "Dwmapi.lib",
                     "opengl32.lib",
                     "shcore.lib",
                     "user32.lib"
                 )
             )
+        }
+    }
+
+    doLast {
+        val dylib = outputs.files.files.singleOrNull { it.name.endsWith(".dylib") }
+        (project.properties["signer"] as String?)?.let { signer ->
+            dylib?.let { lib ->
+                localSign(signer, lib)
+            }
+        }
+        (project.properties["sign_host"] as String?)?.let { sign_host ->
+            dylib?.let { lib ->
+                remoteSign(sign_host, lib)
+            }
         }
     }
 }
@@ -381,9 +443,9 @@ val skikoJvmJar: Provider<Jar> by tasks.registering(Jar::class) {
 }
 
 val createChecksums by project.tasks.registering(org.gradle.crypto.checksum.Checksum::class) {
-    val linkTask = project.tasks.named("link${buildType.id}${targetOs.id.capitalize()}")
+    val linkTask = project.tasks.withType(LinkSharedLibrary::class.java).single { it.name.contains(buildType.id) }
     dependsOn(linkTask)
-    files = linkTask.get().outputs.files.filter { it.isFile } +
+    files = linkTask.outputs.files.filter { it.isFile } +
             if (targetOs.isWindows) files(skiaDir.map { it.resolve("out/${buildType.id}-x64/icudtl.dat") }) else files()
     algorithm = Checksum.Algorithm.SHA256
     outputDir = file("$buildDir/checksums")
@@ -393,9 +455,8 @@ val skikoJvmRuntimeJar by project.tasks.registering(Jar::class) {
     archiveBaseName.set("skiko-$target")
     dependsOn(createChecksums)
     from(skikoJvmJar.map { zipTree(it.archiveFile) })
-    from(project.tasks.named("link${buildType.id}${targetOs.id.capitalize()}").map {
-        it.outputs.files.filter { it.isFile }
-    })
+    val linkTask = project.tasks.withType(LinkSharedLibrary::class.java).single { it.name.contains(buildType.id) }
+    from(linkTask.outputs.files.filter { it.isFile })
     if (targetOs.isWindows) {
         from(files(skiaDir.map { it.resolve("out/${buildType.id}-x64/icudtl.dat") }))
     }
@@ -452,6 +513,13 @@ afterEvaluate {
             disable()
         }
     }
+
+    tasks.named("clean").configure {
+        doLast {
+            delete(skiko.dependenciesDir)
+            delete(project.file("src/jvmMain/java"))
+        }
+    }
 }
 
 publishing {
@@ -499,10 +567,16 @@ publishing {
             }
         }
         create<MavenPublication>("skikoJvmRuntime") {
-            artifactId = SkikoArtifacts.runtimeArtifactIdFor(hostOs, hostArch)
+            artifactId = SkikoArtifacts.runtimeArtifactIdFor(targetOs, targetArch)
             afterEvaluate {
                 artifact(skikoJvmRuntimeJar.map { it.archiveFile.get() })
             }
         }
+    }
+}
+
+tasks.withType<KotlinCompile>().configureEach {
+    if (name == "compileTestKotlinJvm") {
+        kotlinOptions.freeCompilerArgs += "-Xopt-in=kotlin.RequiresOptIn"
     }
 }
