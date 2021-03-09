@@ -268,6 +268,7 @@ tasks.withType(CppCompile::class.java).configureEach {
                     "-DWIN32_LEAN_AND_MEAN",
                     "-DNOMINMAX",
                     "-DSK_GAMMA_APPLY_TO_A8",
+                    "-DSK_DIRECT3D",
                     "/utf-8",
                     "/GR-", // no-RTTI.
                     *buildType.msvcFlags
@@ -299,7 +300,7 @@ project.tasks.register<Exec>("objcCompile") {
     outputs.files(outs)
 }
 
-fun localSign(signer: String, lib: File) {
+fun localSign(signer: String, lib: File): File {
     println("Local signing $lib as $signer")
     val proc = ProcessBuilder("codesign", "-f", "-s", signer, lib.absolutePath)
         .redirectOutput(ProcessBuilder.Redirect.PIPE)
@@ -313,19 +314,34 @@ fun localSign(signer: String, lib: File) {
         println(err)
         throw GradleException("Cannot sign $lib: $err")
     }
+    return lib
 }
 
-fun remoteSign(sign_host: String, lib: File) {
-    println("Remote signing $lib on $sign_host")
-    val user = project.properties["sign_host_user"] as String
-    val token = project.properties["sign_host_token"] as String
-    val out = file("${lib.absolutePath}.signed")
+// See https://github.com/olonho/sealer.
+fun sealBinary(sealer: String, lib: File) {
+    println("Sealing $lib by $sealer")
+    val proc = ProcessBuilder(sealer, "-f", lib.absolutePath, "-p", "Java_")
+        .redirectOutput(ProcessBuilder.Redirect.INHERIT)
+        .redirectError(ProcessBuilder.Redirect.INHERIT)
+        .start()
+    proc.waitFor(2, TimeUnit.MINUTES)
+    if (proc.exitValue() != 0) {
+        throw GradleException("Cannot seal $lib")
+    }
+    println("Sealed!")
+}
+
+
+fun remoteSign(signHost: String, lib: File, out: File) {
+    println("Remote signing $lib on $signHost")
+    val user = skiko.signUser ?: error("signUser is null")
+    val token = skiko.signToken ?: error("signToken is null")
     val cmd = """
-        TOKEN=`curl -fsSL --user $user:$token --url "$sign_host/auth" | grep token | cut -d '"' -f4` \
-        && curl --no-keepalive --data-binary @${lib.absolutePath} \
+        TOKEN=`curl -fsSL --user $user:$token --url "$signHost/auth" | grep token | cut -d '"' -f4` \
+        && curl --no-keepalive --http1.1 --data-binary @${lib.absolutePath} \
         -H "Authorization: Bearer ${'$'}TOKEN" \
         -H "Content-Type:application/x-mac-app-bin" \
-        "$sign_host/sign?name=${lib.name}" -o "${out.absolutePath}"
+        "$signHost/sign?name=${lib.name}" -o "${out.absolutePath}"
     """.trimIndent()
     val proc = ProcessBuilder("bash", "-c", cmd)
         .redirectOutput(ProcessBuilder.Redirect.PIPE)
@@ -338,9 +354,6 @@ fun remoteSign(sign_host: String, lib: File) {
         println(out)
         println(err)
         throw GradleException("Cannot sign $lib: $err")
-    } else {
-        lib.delete()
-        out.renameTo(lib)
     }
 }
 
@@ -366,10 +379,20 @@ tasks.withType(LinkSharedLibrary::class.java).configureEach {
         OS.Linux -> {
             linkerArgs.addAll(
                 listOf(
+                    "-static-libstdc++",
+                    "-static-libgcc",
                     "-lGL",
                     "-lfontconfig",
+                    // A fix for https://github.com/JetBrains/compose-jb/issues/413.
+                    // Dynamic position independent linking uses PLT thunks relying on jump targets in GOT (Global Offsets Table).
+                    // GOT entries marked as (for example) R_X86_64_JUMP_SLOT in the relocation table. So, if there's code loading
+                    // platform libstdc++.so, lazy resolve code will resolve GOT entries to platform libstdc++.so on first invocation,
+                    // and so further execution will break, as those two libstdc++ are not compatible.
+                    // To fix it we enforce resolve of all GOT entries at library load time, and make it read-only afterwards.
+                    "-Wl,-z,relro,-z,now",
                     // Hack to fix problem with linker not always finding certain declarations.
-                    skiaDir.get().absolutePath + "/out/${buildType.id}-${targetArch.id}/libsksg.a"
+                    skiaDir.get().absolutePath + "/out/${buildType.id}-${targetArch.id}/libsksg.a",
+                    skiaDir.get().absolutePath + "/out/${buildType.id}-${targetArch.id}/libskia.a"
                 )
             )
         }
@@ -383,20 +406,6 @@ tasks.withType(LinkSharedLibrary::class.java).configureEach {
                     "user32.lib"
                 )
             )
-        }
-    }
-
-    doLast {
-        val dylib = outputs.files.files.singleOrNull { it.name.endsWith(".dylib") }
-        (project.properties["signer"] as String?)?.let { signer ->
-            dylib?.let { lib ->
-                localSign(signer, lib)
-            }
-        }
-        (project.properties["sign_host"] as String?)?.let { sign_host ->
-            dylib?.let { lib ->
-                remoteSign(sign_host, lib)
-            }
         }
     }
 }
@@ -442,10 +451,31 @@ val skikoJvmJar: Provider<Jar> by tasks.registering(Jar::class) {
     from(kotlin.jvm().compilations["main"].output.allOutputs)
 }
 
-val createChecksums by project.tasks.registering(org.gradle.crypto.checksum.Checksum::class) {
+val maybeSign by project.tasks.registering {
     val linkTask = project.tasks.withType(LinkSharedLibrary::class.java).single { it.name.contains(buildType.id) }
     dependsOn(linkTask)
-    files = linkTask.outputs.files.filter { it.isFile } +
+    val lib = linkTask.outputs.files.single { it.name.endsWith(".dll") ||  it.name.endsWith(".dylib") ||  it.name.endsWith(".so") }
+    inputs.files(lib)
+    val output = file(lib.absolutePath + ".maybesigned")
+    outputs.files(output)
+
+    doLast {
+        if (targetOs == OS.Linux) {
+            // Linux requires additional sealing to run on wider set of platforms.
+            val sealer = "$projectDir/tools/sealer"
+            sealBinary(sealer, lib)
+        }
+        if (skiko.signHost != null) {
+            remoteSign(skiko.signHost!!, lib, output)
+        } else {
+            lib.copyTo(output, overwrite = true)
+        }
+    }
+}
+
+val createChecksums by project.tasks.registering(org.gradle.crypto.checksum.Checksum::class) {
+    dependsOn(maybeSign)
+    files = maybeSign.get().outputs.files +
             if (targetOs.isWindows) files(skiaDir.map { it.resolve("out/${buildType.id}-x64/icudtl.dat") }) else files()
     algorithm = Checksum.Algorithm.SHA256
     outputDir = file("$buildDir/checksums")
@@ -453,10 +483,12 @@ val createChecksums by project.tasks.registering(org.gradle.crypto.checksum.Chec
 
 val skikoJvmRuntimeJar by project.tasks.registering(Jar::class) {
     archiveBaseName.set("skiko-$target")
-    dependsOn(createChecksums)
     from(skikoJvmJar.map { zipTree(it.archiveFile) })
-    val linkTask = project.tasks.withType(LinkSharedLibrary::class.java).single { it.name.contains(buildType.id) }
-    from(linkTask.outputs.files.filter { it.isFile })
+    from(maybeSign.get().outputs.files)
+    rename {
+        // Not just suffix, as could be in middle of SHA256.
+        it.replace(".maybesigned", "")
+    }
     if (targetOs.isWindows) {
         from(files(skiaDir.map { it.resolve("out/${buildType.id}-x64/icudtl.dat") }))
     }
